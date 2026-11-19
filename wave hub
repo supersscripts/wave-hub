@@ -11970,46 +11970,35 @@ local toastCount = 0
 local function toast(text)
 	if destroyed or not uiSettings.Notifications then return end
 	toastCount += 1
-
-	local t = create("Frame", {
+	local t = create("CanvasGroup", {
 		Size = UDim2.fromOffset(250, 42),
 		BackgroundColor3 = TOAST_BG,
-		BackgroundTransparency = 1,
-		BorderSizePixel = 0,
+		GroupTransparency = 1,
 		LayoutOrder = toastCount,
 		Parent = toastHolder,
-	}, { corner(UDim.new(0, 10)) })
-	local bar = create("Frame", {
-		Size = UDim2.new(0, 3, 1, -12),
-		Position = UDim2.fromOffset(0, 6),
-		BackgroundColor3 = TOAST_ACCENT,
-		BackgroundTransparency = 1,
-		BorderSizePixel = 0,
-		Parent = t,
+	}, {
+		corner(UDim.new(0, 10)),
+		create("Frame", {
+			Size = UDim2.new(0, 3, 1, 0),
+			BackgroundColor3 = TOAST_ACCENT,
+			BorderSizePixel = 0,
+		}),
+		create("TextLabel", {
+			Position = UDim2.fromOffset(14, 0),
+			Size = UDim2.new(1, -20, 1, 0),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.GothamBold,
+			Text = text,
+			TextColor3 = Color3.new(1, 1, 1),
+			TextSize = 13,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+		}),
 	})
-	local label = create("TextLabel", {
-		Position = UDim2.fromOffset(14, 0),
-		Size = UDim2.new(1, -20, 1, 0),
-		BackgroundTransparency = 1,
-		Font = Enum.Font.GothamBold,
-		Text = text,
-		TextColor3 = Color3.new(1, 1, 1),
-		TextTransparency = 1,
-		TextSize = 13,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		TextTruncate = Enum.TextTruncate.AtEnd,
-		Parent = t,
-	})
-
-	local function fade(alpha)
-		tween(t, TI_MED, { BackgroundTransparency = alpha })
-		tween(bar, TI_MED, { BackgroundTransparency = alpha })
-		tween(label, TI_MED, { TextTransparency = alpha })
-	end
-	fade(0)
+	tween(t, TI_MED, { GroupTransparency = 0 })
 	task.delay(2.4, function()
 		if not t.Parent then return end
-		fade(1)
+		tween(t, TI_MED, { GroupTransparency = 1 })
 		task.wait(0.35)
 		t:Destroy()
 	end)
