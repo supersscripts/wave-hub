@@ -10938,7 +10938,7 @@ local playerGui = player:WaitForChild("PlayerGui")
 local CONFIG = {
 	Title = "WAVE HUB",
 	Author = "SUPER",
-	Version = "Version 1.0",
+	Version = "Version 1.9",
 	ToggleKey = Enum.KeyCode.RightControl,
 	ToggleKeyPad = Enum.KeyCode.DPadRight,
 
@@ -10948,9 +10948,8 @@ local CONFIG = {
 	},
 
 	ChangeLogs = {
-		"test",
-		"test",
-		"test",
+		"Version 1.9",
+		"OFFICIAL RELEASE",
 	},
 }
 
