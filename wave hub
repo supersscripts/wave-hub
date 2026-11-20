@@ -10938,7 +10938,7 @@ local playerGui = player:WaitForChild("PlayerGui")
 local CONFIG = {
 	Title = "WAVE HUB",
 	Author = "SUPER",
-	Version = "Version 1.9",
+	Version = "Version 2.3",
 	ToggleKey = Enum.KeyCode.RightControl,
 	ToggleKeyPad = Enum.KeyCode.DPadRight,
 
@@ -10948,8 +10948,11 @@ local CONFIG = {
 	},
 
 	ChangeLogs = {
-		"Version 1.9",
-		"OFFICIAL RELEASE",
+		"Version 2.3",
+		"Added ball tp",
+		"Removed boost",
+		"
+		
 	},
 }
 
@@ -10979,14 +10982,13 @@ local THEME = {
 
 -- Features
 
--- Auto Sticky + Boost
+-- Auto Sticky
 
 local HeadHop = {}
 do
 	local settings = {
 		PullStrength = 0.5,
 		Stickiness = 1,
-		BoostPower = 0.5,
 	}
 
 	local CFG = {
@@ -11002,13 +11004,9 @@ do
 		CenterPull = 2,
 		MaxHeadOffset = 0.75, -- furthest from the center of their head it will hold you
 		MoveThreshold = 0.1,
-
-		BoostMinSpeed = 100,
-		BoostMaxSpeed = 326,
-		BoostCooldown = 0.25,
 	}
 
-	local stickyOn, boostOn = false, false
+	local stickyOn = false
 	local running = false
 	local conns = {}
 	local charConns = {}
@@ -11022,8 +11020,6 @@ do
 	local lastContact = 0
 	local lastTheirYaw = nil
 	local jumpedOff = false
-	local lastBoost = 0
-	local boostUsed = false
 	local lastJumpRequest = 0
 	local stickArmed = false -- only true after a jump you actually pressed
 
@@ -11130,7 +11126,6 @@ do
 		attach, pullMover, stickMover = nil, nil, nil
 		character, humanoid, root = nil, nil, nil
 		jumpedOff = false
-		boostUsed = false
 		stickArmed = false
 	end
 
@@ -11174,7 +11169,6 @@ do
 				-- only count jumps you actually pressed (not pushes / physics)
 				if os.clock() - lastJumpRequest < 0.5 then
 					jumpedOff = true
-					boostUsed = false
 					stickArmed = true
 					if stickyOn then
 						pullTarget = findBestHead()
@@ -11301,37 +11295,6 @@ do
 		lastTheirYaw = theirYaw
 	end
 
-	local function updateBoost(dt)
-		if not boostOn or settings.BoostPower <= 0 then return end
-		if boostUsed then return end
-
-		local vel = root.AssemblyLinearVelocity
-		if vel.Y > -1 then return end
-		if os.clock() - lastBoost < CFG.BoostCooldown then return end
-
-		local reach = legLength() + 0.5 + math.max(0, -vel.Y) * dt * 1.5
-		rayParams.FilterDescendantsInstances = { character }
-		local result = workspace:Raycast(root.Position, Vector3.new(0, -reach, 0), rayParams)
-		if not result then return end
-
-		local model = result.Instance:FindFirstAncestorOfClass("Model")
-		if not (model and model ~= character and Players:GetPlayerFromCharacter(model) and isAlive(model)) then
-			return
-		end
-
-		lastBoost = os.clock()
-		boostUsed = true
-		local t = math.clamp((settings.BoostPower - 0.01) / 0.99, 0, 1)
-		local speed = CFG.BoostMinSpeed + (CFG.BoostMaxSpeed - CFG.BoostMinSpeed) * t
-		root.AssemblyLinearVelocity = Vector3.new(vel.X, speed, vel.Z)
-
-		jumpedOff = true
-		releaseStick()
-		if stickyOn then
-			pullTarget = model:FindFirstChild("Head")
-		end
-	end
-
 	local function step(dt)
 		if not (character and humanoid and root and pullMover and stickMover and humanoid.Health > 0) then
 			return
@@ -11341,12 +11304,6 @@ do
 		local isMoving = moveDir.Magnitude > CFG.MoveThreshold
 		local state = humanoid:GetState()
 		local airborne = state == Enum.HumanoidStateType.Jumping or state == Enum.HumanoidStateType.Freefall
-
-		if boostUsed and not airborne and not getStandingCharacter() then
-			boostUsed = false
-		end
-
-		updateBoost(dt)
 
 		if stickyOn then
 			updatePull(airborne, isMoving, moveDir)
@@ -11393,7 +11350,7 @@ do
 	end
 
 	local function refresh()
-		if stickyOn or boostOn then start() else stop() end
+		if stickyOn then start() else stop() end
 	end
 
 	function HeadHop.EnableSticky()
@@ -11407,22 +11364,12 @@ do
 		releaseStick()
 		refresh()
 	end
-	function HeadHop.EnableBoost()
-		boostOn = true
-		refresh()
-	end
-	function HeadHop.DisableBoost()
-		boostOn = false
-		refresh()
-	end
 
 	function HeadHop.SetPullStrength(v) settings.PullStrength = v end
 	function HeadHop.SetStickiness(v) settings.Stickiness = v end
-	function HeadHop.SetBoostPower(v) settings.BoostPower = v end
 	HeadHop.Defaults = {
 		PullStrength = settings.PullStrength,
 		Stickiness = settings.Stickiness,
-		BoostPower = settings.BoostPower,
 	}
 end
 
@@ -11952,14 +11899,6 @@ local Features = {
 			{ Name = "STICKINESS", Default = HeadHop.Defaults.Stickiness, OnChange = HeadHop.SetStickiness },
 		},
 	},
-	["BOOST"] = {
-		Description = "Boosts you up when you jump on somebodies head",
-		Enable = HeadHop.EnableBoost,
-		Disable = HeadHop.DisableBoost,
-		Sliders = {
-			{ Name = "BOOST POWER", Default = HeadHop.Defaults.BoostPower, OnChange = HeadHop.SetBoostPower },
-		},
-	},
 	["OG CATCH ANIMATION"] = {
 		Description = "Original ultimate football catch animation",
 		Enable = CatchAnim.Enable,
@@ -11987,7 +11926,7 @@ local Features = {
 	},
 }
 
-local TAB_ORDER = { "HOME", "AUTO STICKY", "BOOST", "BALL TP", "LOOP", "OG CATCH ANIMATION", "SETTINGS" }
+local TAB_ORDER = { "HOME", "AUTO STICKY", "BALL TP", "LOOP", "OG CATCH ANIMATION", "SETTINGS" }
 
 local binds, listening, keyName, makeNumberInput
 local uiSettings = { Notifications = true }
