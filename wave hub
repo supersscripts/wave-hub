@@ -10985,7 +10985,7 @@ local HeadHop = {}
 do
 	local settings = {
 		PullStrength = 0.5,
-		Stickiness = 0.5,
+		Stickiness = 1,
 		BoostPower = 0.5,
 	}
 
@@ -10998,9 +10998,9 @@ do
 		PullForce = 15000,
 		FastArrive = 0.7,
 
-		StickForce = 20000,
-		CenterPull = 4,
-		GraceTime = 0.4,
+		StickForce = 60000,
+		CenterPull = 2,
+		MaxHeadOffset = 0.75, -- furthest from the center of their head it will hold you
 		MoveThreshold = 0.1,
 
 		BoostMinSpeed = 100,
@@ -11062,13 +11062,42 @@ do
 		return best
 	end
 
+	-- walk up through helmets / gear models until we reach the actual player character
+	local function characterFromPart(part)
+		local model = part and part:FindFirstAncestorOfClass("Model")
+		while model do
+			if Players:GetPlayerFromCharacter(model) then return model end
+			model = model:FindFirstAncestorOfClass("Model")
+		end
+		return nil
+	end
+
 	local function getStandingCharacter()
+		local reach = legLength() + 1.5
 		rayParams.FilterDescendantsInstances = { character }
-		local result = workspace:Raycast(root.Position, Vector3.new(0, -(legLength() + 1.5), 0), rayParams)
+		local dir = Vector3.new(0, -reach, 0)
+		local result = workspace:Spherecast(root.Position, 1, dir, rayParams)
+			or workspace:Raycast(root.Position, dir, rayParams)
 		if result then
-			local model = result.Instance:FindFirstAncestorOfClass("Model")
-			if model and model ~= character and Players:GetPlayerFromCharacter(model) and isAlive(model) then
+			local model = characterFromPart(result.Instance)
+			if model and model ~= character and isAlive(model) then
 				return model
+			end
+		end
+
+		-- backup: is someone's head right under your feet? (works even if the game hides heads from raycasts)
+		for _, other in ipairs(Players:GetPlayers()) do
+			local char = other.Character
+			if other ~= player and char and isAlive(char) then
+				local head = char:FindFirstChild("Head")
+				if head then
+					local off = root.Position - head.Position
+					local flat = Vector3.new(off.X, 0, off.Z).Magnitude
+					local above = off.Y
+					if flat < 2.5 and above > 0 and above < reach + head.Size.Y then
+						return char
+					end
+				end
 			end
 		end
 		return nil
@@ -11081,7 +11110,8 @@ do
 		local look = theirRoot.CFrame.LookVector
 		look = Vector3.new(look.X, 0, look.Z)
 		if look.Magnitude < 0.01 then look = Vector3.new(0, 0, -1) end
-		return CFrame.lookAt(head.Position, head.Position + look.Unit), math.atan2(-look.X, -look.Z)
+		-- no turning: your spot is kept in world directions, so you don't spin when they turn
+		return CFrame.new(head.Position), math.atan2(-look.X, -look.Z)
 	end
 
 	local function releaseStick()
@@ -11142,7 +11172,7 @@ do
 		table.insert(charConns, humanoid.StateChanged:Connect(function(_, newState)
 			if newState == Enum.HumanoidStateType.Jumping then
 				-- only count jumps you actually pressed (not pushes / physics)
-				if os.clock() - lastJumpRequest < 0.25 then
+				if os.clock() - lastJumpRequest < 0.5 then
 					jumpedOff = true
 					boostUsed = false
 					stickArmed = true
@@ -11212,8 +11242,8 @@ do
 			end
 			lastContact = now
 		elseif stickModel then
-			local grace = CFG.GraceTime * settings.Stickiness
-			if now - lastContact > grace or not isAlive(stickModel) then
+			-- infinite grace: never times out, only lets go if they die
+			if not isAlive(stickModel) then
 				releaseStick()
 				return
 			end
@@ -11227,25 +11257,47 @@ do
 			return
 		end
 
+		if isMoving then
+			-- you're walking: don't hold you in place
+			stickMover.Enabled = false
+			if not under then
+				-- walked off their head on purpose: let go
+				releaseStick()
+				stickArmed = false
+				return
+			end
+			-- still on their head: remember your new spot so it holds you there when you stop
+			local rel = yawCF:PointToObjectSpace(root.Position)
+			stickOffset = Vector3.new(rel.X, 0, rel.Z)
+			lastTheirYaw = theirYaw
+			return
+		end
+
 		if not stickOffset then
 			local rel = yawCF:PointToObjectSpace(root.Position)
 			stickOffset = Vector3.new(rel.X, 0, rel.Z)
 		end
 
 		stickOffset = stickOffset * (1 - math.clamp(dt * CFG.CenterPull * settings.Stickiness, 0, 1))
-
-		local target = yawCF:PointToWorldSpace(stickOffset)
-		local force = root.AssemblyMass * CFG.StickForce * settings.Stickiness
-		stickMover.Position = Vector3.new(target.X, root.Position.Y, target.Z)
-		stickMover.MaxAxesForce = Vector3.new(force, 0, force)
-		stickMover.Enabled = true
-
-		if lastTheirYaw then
-			local dYaw = (theirYaw - lastTheirYaw + math.pi) % (2 * math.pi) - math.pi
-			if math.abs(dYaw) > 0.0001 and math.abs(dYaw) < 1 then
-				root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, dYaw, 0) * root.CFrame.Rotation
-			end
+		-- keep you over their HEAD, not their shoulder/torso (eased in, not snapped)
+		if stickOffset.Magnitude > CFG.MaxHeadOffset then
+			local newMag = math.max(CFG.MaxHeadOffset, stickOffset.Magnitude - 8 * dt)
+			stickOffset = stickOffset.Unit * newMag
 		end
+
+		-- carry you by moving your position with their head, and give you exactly their
+		-- sideways speed, so relative to their head you're standing still (not walking)
+		stickMover.Enabled = false
+		local target = yawCF:PointToWorldSpace(stickOffset)
+		local cur = root.Position
+		local goal = Vector3.new(target.X, cur.Y, target.Z)
+		local newPos = cur:Lerp(goal, math.clamp(settings.Stickiness, 0, 1))
+		root.CFrame = CFrame.new(newPos) * root.CFrame.Rotation
+		local theirHead = stickModel:FindFirstChild("Head")
+		local tv = theirHead and theirHead.AssemblyLinearVelocity or Vector3.zero
+		local v = root.AssemblyLinearVelocity
+		root.AssemblyLinearVelocity = Vector3.new(tv.X, v.Y, tv.Z)
+
 		lastTheirYaw = theirYaw
 	end
 
@@ -11306,11 +11358,15 @@ do
 		end
 
 		-- back on normal ground (not a head): need a new jump before it sticks again
-		if not airborne and not stickModel and not getStandingCharacter() then
+		if stickArmed and not airborne and not stickModel and not getStandingCharacter()
+			and os.clock() - lastJumpRequest > 0.5 then
 			stickArmed = false
 		end
 
-		if jumpedOff and not airborne then
+		-- count as landed once you're on the ground, or on someone's head and no longer rising
+		-- (Roblox often still says "falling" while you're standing on a head)
+		if jumpedOff and (not airborne
+			or (getStandingCharacter() and root.AssemblyLinearVelocity.Y <= 0.5)) then
 			jumpedOff = false
 		end
 	end
@@ -11322,6 +11378,7 @@ do
 		table.insert(conns, RunService.Heartbeat:Connect(step))
 		table.insert(conns, UserInputService.JumpRequest:Connect(function()
 			lastJumpRequest = os.clock()
+			stickArmed = true
 		end))
 		if player.Character then
 			task.spawn(onCharacterAdded, player.Character)
@@ -11909,7 +11966,7 @@ local Features = {
 		Disable = CatchAnim.Disable,
 	},
 	["BALL TP"] = {
-		Description = "Teleports the ball to you",
+		Description = "Pulls the nearest loose football to you so you can catch it",
 		Enable = BallTP.Enable,
 		Disable = BallTP.Disable,
 	},
@@ -11982,21 +12039,20 @@ end
 
 local function onClick(obj, fn)
 	obj.Active = true
-	local pressed = false
-	local function isPress(input)
-		return input.UserInputType == Enum.UserInputType.MouseButton1
-			or input.UserInputType == Enum.UserInputType.Touch
-	end
 	obj.InputBegan:Connect(function(input)
-		if isPress(input) then pressed = true end
+		local kind = input.UserInputType
+		if kind ~= Enum.UserInputType.MouseButton1 and kind ~= Enum.UserInputType.Touch then return end
+		local start = input.Position
+		local conn
+		conn = input.Changed:Connect(function()
+			if input.UserInputState ~= Enum.UserInputState.End then return end
+			conn:Disconnect()
+			-- counts as a click/tap if the finger or mouse didn't drag away
+			if (input.Position - start).Magnitude <= 12 then
+				fn()
+			end
+		end)
 	end)
-	obj.InputEnded:Connect(function(input)
-		if pressed and isPress(input) then
-			pressed = false
-			fn()
-		end
-	end)
-	obj.MouseLeave:Connect(function() pressed = false end)
 end
 
 local function padding(px)
@@ -12491,7 +12547,7 @@ keyName = function(keyCode)
 	if PRETTY_KEYS[keyCode.Name] then return PRETTY_KEYS[keyCode.Name] end
 	if GAMEPAD_KEYS[keyCode] then
 		local n = keyCode.Name:gsub("^Button", "")
-		return "PAD " .. n:upper()
+		return n:upper()
 	end
 	return keyCode.Name:upper()
 end
