@@ -11024,6 +11024,8 @@ do
 	local jumpedOff = false
 	local lastBoost = 0
 	local boostUsed = false
+	local lastJumpRequest = 0
+	local stickArmed = false -- only true after a jump you actually pressed
 
 	local rayParams = RaycastParams.new()
 	rayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -11099,6 +11101,7 @@ do
 		character, humanoid, root = nil, nil, nil
 		jumpedOff = false
 		boostUsed = false
+		stickArmed = false
 	end
 
 	local function onCharacterAdded(char)
@@ -11138,10 +11141,14 @@ do
 
 		table.insert(charConns, humanoid.StateChanged:Connect(function(_, newState)
 			if newState == Enum.HumanoidStateType.Jumping then
-				jumpedOff = true
-				boostUsed = false
-				if stickyOn then
-					pullTarget = findBestHead()
+				-- only count jumps you actually pressed (not pushes / physics)
+				if os.clock() - lastJumpRequest < 0.25 then
+					jumpedOff = true
+					boostUsed = false
+					stickArmed = true
+					if stickyOn then
+						pullTarget = findBestHead()
+					end
 				end
 			elseif newState == Enum.HumanoidStateType.Landed
 				or newState == Enum.HumanoidStateType.Running
@@ -11179,12 +11186,6 @@ do
 		local aim = head.Position + Vector3.new(headVel.X, 0, headVel.Z) * t
 		local flat = Vector3.new(aim.X - root.Position.X, 0, aim.Z - root.Position.Z)
 
-		if isMoving and flat.Magnitude > 0.5 and moveDir.Unit:Dot(flat.Unit) < -0.3 then
-			pullTarget = nil
-			pullMover.Enabled = false
-			return
-		end
-
 		local needed = flat / t + Vector3.new(headVel.X, 0, headVel.Z) * 0.5
 		if needed.Magnitude > CFG.MaxPullSpeed then
 			needed = needed.Unit * CFG.MaxPullSpeed
@@ -11196,7 +11197,7 @@ do
 	end
 
 	local function updateStick(dt, isMoving)
-		if settings.Stickiness <= 0 or jumpedOff then
+		if settings.Stickiness <= 0 or jumpedOff or not stickArmed then
 			releaseStick()
 			return
 		end
@@ -11223,14 +11224,6 @@ do
 		local yawCF, theirYaw = headYawCFrame(stickModel)
 		if not yawCF then
 			releaseStick()
-			return
-		end
-
-		if isMoving then
-			stickMover.Enabled = false
-			local rel = yawCF:PointToObjectSpace(root.Position)
-			stickOffset = Vector3.new(rel.X, 0, rel.Z)
-			lastTheirYaw = theirYaw
 			return
 		end
 
@@ -11312,6 +11305,11 @@ do
 			releaseStick()
 		end
 
+		-- back on normal ground (not a head): need a new jump before it sticks again
+		if not airborne and not stickModel and not getStandingCharacter() then
+			stickArmed = false
+		end
+
 		if jumpedOff and not airborne then
 			jumpedOff = false
 		end
@@ -11322,6 +11320,9 @@ do
 		running = true
 		table.insert(conns, player.CharacterAdded:Connect(onCharacterAdded))
 		table.insert(conns, RunService.Heartbeat:Connect(step))
+		table.insert(conns, UserInputService.JumpRequest:Connect(function()
+			lastJumpRequest = os.clock()
+		end))
 		if player.Character then
 			task.spawn(onCharacterAdded, player.Character)
 		end
@@ -11549,6 +11550,341 @@ do
 	end
 end
 
+-- Ball TP
+
+local BallTP = {}
+do
+
+	local Players          = game:GetService("Players")
+	local RunService       = game:GetService("RunService")
+	local UserInputService = game:GetService("UserInputService")
+	local Workspace        = game:GetService("Workspace")
+	local CoreGui          = game:GetService("CoreGui")
+
+	local plr = Players.LocalPlayer
+	if not plr then
+		repeat task.wait(0.1) until Players.LocalPlayer
+		plr = Players.LocalPlayer
+	end
+
+	local S = {
+		enabled  = false,
+		range    = 60,
+		strength = 40,
+		snapDist = 20,
+		maxSpeed = 500,
+	}
+
+	local char, root, hum
+	local ball, lastScan = nil, 0
+	local catchParts = {}
+	local savedCollide = nil
+	local lastHandRefresh = 0
+	local lastOwnedBall = nil
+
+	local fireTouch = type(firetouchinterest) == "function" and firetouchinterest or nil
+	if type(setsimulationradius) == "function" then
+		pcall(setsimulationradius, 1e6, 1e6)
+	end
+
+	local BALL_GROUP = "BallTPPull"
+	do
+		pcall(function()
+			local PS = game:GetService("PhysicsService")
+			local ok, groups = pcall(function() return PS:GetRegisteredCollisionGroups() end)
+			local exists = false
+			if ok and groups then
+				for _, g in ipairs(groups) do
+					if g.name == BALL_GROUP then exists = true; break end
+				end
+			end
+			if not exists then PS:RegisterCollisionGroup(BALL_GROUP) end
+			PS:CollisionGroupSetCollidable(BALL_GROUP, "Default", false)
+			PS:CollisionGroupSetCollidable(BALL_GROUP, BALL_GROUP, false)
+		end)
+	end
+
+	local function setBallGroup(b, useGroup)
+		if not b then return end
+		pcall(function()
+			if useGroup then
+				if b.CollisionGroup ~= BALL_GROUP then b.CollisionGroup = BALL_GROUP end
+			else
+				if b.CollisionGroup == BALL_GROUP then b.CollisionGroup = "Default" end
+			end
+		end)
+	end
+
+	local ballCache = {}
+	local ballCacheDirty = true
+
+	local function isBall(v)
+		if not v or not v:IsA("BasePart") then return false end
+		local n = string.lower(v.Name)
+		if string.find(n, "baseball", 1, true) then return false end
+		return n == "football" or n == "footballmain" or n == "pigskin" or n == "handle"
+			or string.find(n, "football", 1, true) ~= nil
+			or string.find(n, "pigskin", 1, true) ~= nil
+	end
+
+	local function heldOther(b)
+		if not b or not b.Parent then return false end
+		for _, c in ipairs(b:GetChildren()) do
+			if c:IsA("Weld") or c:IsA("WeldConstraint") or c:IsA("Motor6D") then
+				local other = c.Part0 == b and c.Part1 or c.Part0
+				if other then
+					local m = other:FindFirstAncestorOfClass("Model")
+					if m and m ~= char and m:FindFirstChildOfClass("Humanoid") then
+						return true
+					end
+				end
+			end
+		end
+		local m = b:FindFirstAncestorOfClass("Model")
+		if m and m ~= char and m:FindFirstChildOfClass("Humanoid") then return true end
+		return false
+	end
+
+	local function heldUs(b)
+		if not b or not char then return false end
+		if b:IsDescendantOf(char) then return true end
+		for _, t in ipairs(char:GetChildren()) do
+			if t:IsA("Tool") and b:IsDescendantOf(t) then return true end
+		end
+		return false
+	end
+
+	local function rebuildCache()
+		ballCache = {}
+		for _, v in ipairs(Workspace:GetChildren()) do
+			if isBall(v) then
+				ballCache[v] = true
+			elseif v:IsA("Model") or v:IsA("Tool") then
+				for _, c in ipairs(v:GetChildren()) do
+					if isBall(c) then ballCache[c] = true end
+				end
+			end
+		end
+		ballCacheDirty = false
+	end
+
+	local function registerMaybe(c)
+		if isBall(c) then
+			ballCache[c] = true
+		elseif c:IsA("Model") or c:IsA("Tool") then
+			for _, cc in ipairs(c:GetChildren()) do
+				if isBall(cc) then ballCache[cc] = true end
+			end
+		end
+	end
+
+	Workspace.ChildAdded:Connect(registerMaybe)
+	Workspace.ChildRemoved:Connect(function(c) ballCache[c] = nil end)
+	Workspace.DescendantAdded:Connect(function(d)
+		if isBall(d) then ballCache[d] = true end
+	end)
+
+	local function findBall()
+		if ball and ball.Parent and not heldOther(ball) and not heldUs(ball) then
+			return ball
+		end
+		if tick() - lastScan < 0.05 then return ball end
+		lastScan = tick()
+
+		if ballCacheDirty then rebuildCache() end
+
+		local origin = root and root.Position or Vector3.zero
+		local best, bestD = nil, math.huge
+
+		for p in pairs(ballCache) do
+			if p.Parent and not heldOther(p) and not heldUs(p) then
+				local d = (p.Position - origin).Magnitude
+				if d < bestD then bestD = d; best = p end
+			elseif not p.Parent then
+				ballCache[p] = nil
+			end
+		end
+
+		if ball and ball ~= best then setBallGroup(ball, false) end
+		ball = best
+		return ball
+	end
+
+	local function refreshParts()
+		catchParts = {}
+		if not char then return end
+		for _, n in ipairs({
+			"RightHand","LeftHand","RightLowerArm","LeftLowerArm",
+			"Right Arm","Left Arm","RightUpperArm","LeftUpperArm",
+			"HumanoidRootPart","UpperTorso","LowerTorso","Torso","Head"
+		}) do
+			local p = char:FindFirstChild(n)
+			if p and p:IsA("BasePart") then table.insert(catchParts, p) end
+		end
+	end
+
+	local function touch(b)
+		if not fireTouch or not b or not b.Parent then return end
+		for _, p in ipairs(catchParts) do
+			if p and p.Parent then
+				pcall(fireTouch, p, b, 0)
+				pcall(fireTouch, p, b, 1)
+			end
+		end
+	end
+
+	local function hrpPos()
+		if not root or not root.Parent then return nil end
+		return root.Position + root.CFrame.LookVector * 1.3 + Vector3.new(0, 1.1, 0)
+	end
+
+	local function softCollide(b)
+		if not b then return end
+		setBallGroup(b, true)
+		if savedCollide == nil then
+			pcall(function() savedCollide = b.CanCollide end)
+		end
+		pcall(function() b.CanCollide = false end)
+	end
+
+	local function restoreCollide(b)
+		setBallGroup(b, false)
+		if b and savedCollide ~= nil then
+			pcall(function() b.CanCollide = savedCollide end)
+		end
+		savedCollide = nil
+	end
+
+	local function takeOwnership(b)
+		if not b or b == lastOwnedBall then return end
+		lastOwnedBall = b
+		pcall(function() b:SetNetworkOwner(plr) end)
+	end
+
+	local function snapVel(b, target)
+		local delta = target - b.Position
+		local dist = delta.Magnitude
+		if dist < 0.1 then
+			pcall(function()
+				b.AssemblyLinearVelocity = Vector3.zero
+				b.AssemblyAngularVelocity = Vector3.zero
+			end)
+			touch(b)
+			return
+		end
+
+		softCollide(b)
+		local dir = delta.Unit
+		local speed = math.clamp(dist * 25, 10, 45)
+
+		pcall(function()
+			local v = dir * speed
+			v = Vector3.new(v.X, math.clamp(v.Y, -15, 15), v.Z)
+			b.AssemblyLinearVelocity = v
+			b.AssemblyAngularVelocity = Vector3.zero
+		end)
+		touch(b)
+	end
+
+	local function pullVel(b, target, dt)
+		local delta = target - b.Position
+		local dist = delta.Magnitude
+		if dist < 0.1 then
+			snapVel(b, target)
+			return
+		end
+
+		softCollide(b)
+		local dir = delta.Unit
+		local speed = math.min(S.maxSpeed, 30 + dist * 20) * (S.strength / 12)
+		local tv = dir * speed
+
+		pcall(function()
+			local cur = b.AssemblyLinearVelocity
+			cur = Vector3.new(cur.X, cur.Y * 0.5, cur.Z)
+			local alpha = math.clamp(dt * 35, 0, 0.85)
+			local newVel = cur:Lerp(tv, alpha)
+			if newVel.Magnitude > S.maxSpeed then
+				newVel = newVel.Unit * S.maxSpeed
+			end
+			b.AssemblyLinearVelocity = newVel
+			b.AssemblyAngularVelocity = b.AssemblyAngularVelocity * 0.1
+		end)
+		if dist < 7 then touch(b) end
+	end
+
+	local function bind(c)
+		char = c
+		root = c:WaitForChild("HumanoidRootPart", 8)
+		hum  = c:WaitForChild("Humanoid", 8)
+		if ball then restoreCollide(ball) end
+		ball = nil
+		savedCollide = nil
+		lastOwnedBall = nil
+		ballCacheDirty = true
+		task.wait(0.05)
+		refreshParts()
+	end
+
+	if plr.Character then task.spawn(bind, plr.Character) end
+	plr.CharacterAdded:Connect(function(c) task.spawn(bind, c) end)
+	plr.CharacterRemoving:Connect(function()
+		if ball then restoreCollide(ball) end
+		char, root, hum, ball = nil, nil, nil, nil
+		catchParts = {}
+		lastOwnedBall = nil
+	end)
+
+	RunService.Heartbeat:Connect(function(dt)
+		if not S.enabled or not char or not root or not hum then return end
+		if hum.Health <= 0 then return end
+
+		local now = tick()
+		if now - lastHandRefresh > 0.25 then
+			lastHandRefresh = now
+			if #catchParts == 0 or not catchParts[1].Parent then
+				refreshParts()
+			end
+		end
+
+		local b = findBall()
+		if not b or not b.Parent or heldOther(b) or heldUs(b) then
+			if ball then restoreCollide(ball) end
+			return
+		end
+
+		local target = hrpPos()
+		if not target then return end
+		local dist = (b.Position - target).Magnitude
+		if dist > S.range then
+			restoreCollide(b)
+			return
+		end
+
+		pcall(function()
+			if b.Anchored then b.Anchored = false end
+			if b.Massless then b.Massless = false end
+		end)
+
+		takeOwnership(b)
+
+		if dist <= S.snapDist then
+			snapVel(b, target)
+		else
+			pullVel(b, target, dt)
+		end
+	end)
+
+	function BallTP.Enable()
+		S.enabled = true
+	end
+
+	function BallTP.Disable()
+		S.enabled = false
+		if ball then restoreCollide(ball) end
+	end
+end
+
 local Features = {
 	["AUTO STICKY"] = {
 		Description = "Sticky head with pull strength",
@@ -11572,6 +11908,11 @@ local Features = {
 		Enable = CatchAnim.Enable,
 		Disable = CatchAnim.Disable,
 	},
+	["BALL TP"] = {
+		Description = "Teleports the ball to you",
+		Enable = BallTP.Enable,
+		Disable = BallTP.Disable,
+	},
 	["LOOP"] = {
 		Description = "Adjusts walkspeed and can be used for rocket boosts",
 		Enable = SpeedLoop.Enable,
@@ -11589,7 +11930,7 @@ local Features = {
 	},
 }
 
-local TAB_ORDER = { "HOME", "AUTO STICKY", "BOOST", "OG CATCH ANIMATION", "LOOP", "SETTINGS" }
+local TAB_ORDER = { "HOME", "AUTO STICKY", "BOOST", "BALL TP", "LOOP", "OG CATCH ANIMATION", "SETTINGS" }
 
 local binds, listening, keyName, makeNumberInput
 local uiSettings = { Notifications = true }
