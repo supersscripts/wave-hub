@@ -10951,8 +10951,6 @@ local CONFIG = {
 		"Version 2.3",
 		"Added ball tp",
 		"Removed boost",
-		"
-		
 	},
 }
 
