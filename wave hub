@@ -10938,7 +10938,7 @@ local playerGui = player:WaitForChild("PlayerGui")
 local CONFIG = {
 	Title = "WAVE HUB",
 	Author = "SUPER",
-	Version = "Version 2.4",
+	Version = "Version 2.5",
 	ToggleKey = Enum.KeyCode.RightControl,
 	ToggleKeyPad = Enum.KeyCode.DPadRight,
 
@@ -10948,7 +10948,7 @@ local CONFIG = {
 	},
 
 	ChangeLogs = {
-		"Version 2.4",
+		"Version 2.5",
 		"Fixed ball tp",
 	},
 }
@@ -11704,41 +11704,44 @@ do
 		if isBall(d) then ballCache[d] = true end
 	end)
 
+	local function usable(p)
+		return p and p.Parent and not heldOther(p) and not heldUs(p)
+	end
+
 	local function findBall()
-		if ball and ball.Parent and not heldOther(ball) and not heldUs(ball) then
-			return ball
-		end
 		if ball and not ball.Parent then
 			ballCache[ball] = nil
 			ball = nil
 		end
-		if tick() - lastScan < 0.05 then return ball end
+
+		-- keep the current ball briefly, but re-pick the nearest one 5 times a second
+		-- so it never stays locked onto a far-away ball / prop while a closer one is on the floor
+		local current = usable(ball) and ball or nil
+		if tick() - lastScan < (current and 0.2 or 0.05) then return current end
 		lastScan = tick()
 
 		if ballCacheDirty then rebuildCache() end
 
 		local origin = root and root.Position or Vector3.zero
-		local best, bestD = nil, math.huge
-
-		for p in pairs(ballCache) do
-			if p.Parent and not heldOther(p) and not heldUs(p) then
-				local d = (p.Position - origin).Magnitude
-				if d < bestD then bestD = d; best = p end
-			elseif not p.Parent then
-				ballCache[p] = nil
-			end
-		end
-
-		-- nothing usable found (old ball destroyed, new one renamed or deep in a folder):
-		-- search the whole workspace again, at most every half second
-		if not best and tick() - lastFullScan > 0.5 then
-			rebuildCache()
+		local function nearest()
+			local best, bestD = nil, math.huge
 			for p in pairs(ballCache) do
-				if p.Parent and not heldOther(p) and not heldUs(p) then
+				if usable(p) then
 					local d = (p.Position - origin).Magnitude
 					if d < bestD then bestD = d; best = p end
+				elseif not p.Parent then
+					ballCache[p] = nil
 				end
 			end
+			return best, bestD
+		end
+
+		local best, bestD = nearest()
+
+		-- nothing usable in range: search the whole workspace again, at most every half second
+		if (not best or bestD > S.range) and tick() - lastFullScan > 0.5 then
+			rebuildCache()
+			best, bestD = nearest()
 		end
 
 		if ball and ball ~= best then setBallGroup(ball, false) end
