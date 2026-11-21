@@ -11940,7 +11940,7 @@ local Features = {
 		Disable = CatchAnim.Disable,
 	},
 	["BALL TP"] = {
-		Description = "Pulls the nearest loose football to you so you can catch it",
+		Description = "Teleports the ball into your hands",
 		Enable = BallTP.Enable,
 		Disable = BallTP.Disable,
 	},
