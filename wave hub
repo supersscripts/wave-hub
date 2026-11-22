@@ -10949,7 +10949,7 @@ local CONFIG = {
 
 	ChangeLogs = {
 		"Version 2.5",
-		"Fixed ball tp",
+		"Fixed lag with ball tp on",
 	},
 }
 
@@ -11630,17 +11630,6 @@ do
 
 	local function heldOther(b)
 		if not b or not b.Parent then return false end
-		for _, c in ipairs(b:GetChildren()) do
-			if c:IsA("Weld") or c:IsA("WeldConstraint") or c:IsA("Motor6D") then
-				local other = c.Part0 == b and c.Part1 or c.Part0
-				if other then
-					local m = other:FindFirstAncestorOfClass("Model")
-					if m and m ~= char and m:FindFirstChildOfClass("Humanoid") then
-						return true
-					end
-				end
-			end
-		end
 		local m = b:FindFirstAncestorOfClass("Model")
 		if m and m ~= char and m:FindFirstChildOfClass("Humanoid") then return true end
 		return false
@@ -11651,19 +11640,6 @@ do
 		if b:IsDescendantOf(char) then return true end
 		for _, t in ipairs(char:GetChildren()) do
 			if t:IsA("Tool") and b:IsDescendantOf(t) then return true end
-		end
-		return false
-	end
-
-	local lastFullScan = 0
-
-	-- strict check for the deep search, so random map parts never count as the ball
-	local function isRealBall(v)
-		if not v:IsA("BasePart") then return false end
-		local n = string.lower(v.Name)
-		if n == "football" or n == "footballmain" or n == "pigskin" then return true end
-		if n == "handle" and v.Parent then
-			return string.find(string.lower(v.Parent.Name), "football", 1, true) ~= nil
 		end
 		return false
 	end
@@ -11680,12 +11656,7 @@ do
 				end
 			end
 		end
-		-- plus real footballs anywhere deeper in the map
-		for _, v in ipairs(Workspace:GetDescendants()) do
-			if isRealBall(v) then ballCache[v] = true end
-		end
 		ballCacheDirty = false
-		lastFullScan = tick()
 	end
 
 	local function registerMaybe(c)
@@ -11737,12 +11708,6 @@ do
 		end
 
 		local best, bestD = nearest()
-
-		-- nothing usable in range: search the whole workspace again, at most every half second
-		if (not best or bestD > S.range) and tick() - lastFullScan > 0.5 then
-			rebuildCache()
-			best, bestD = nearest()
-		end
 
 		if ball and ball ~= best then setBallGroup(ball, false) end
 		ball = best
@@ -11940,7 +11905,7 @@ local Features = {
 		Disable = CatchAnim.Disable,
 	},
 	["BALL TP"] = {
-		Description = "Teleports the ball into your hands",
+		Description = "Pulls the nearest loose football to you so you can catch it",
 		Enable = BallTP.Enable,
 		Disable = BallTP.Disable,
 	},
