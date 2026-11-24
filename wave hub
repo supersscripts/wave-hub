@@ -10949,7 +10949,7 @@ local CONFIG = {
 
 	ChangeLogs = {
 		"Version 2.4",
-		"Fixed auto sticky bug",
+		"Fixed auto sticky glitch",
 	},
 }
 
