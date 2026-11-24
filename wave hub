@@ -10938,7 +10938,7 @@ local playerGui = player:WaitForChild("PlayerGui")
 local CONFIG = {
 	Title = "WAVE HUB",
 	Author = "SUPER",
-	Version = "Version 2.5",
+	Version = "Version 2.4",
 	ToggleKey = Enum.KeyCode.RightControl,
 	ToggleKeyPad = Enum.KeyCode.DPadRight,
 
@@ -10948,8 +10948,8 @@ local CONFIG = {
 	},
 
 	ChangeLogs = {
-		"Version 2.5",
-		"Fixed lag with ball tp on",
+		"Version 2.4",
+		"Fixed auto sticky bug",
 	},
 }
 
@@ -10996,6 +10996,7 @@ do
 		MaxPullSpeed = 60,
 		PullForce = 15000,
 		FastArrive = 0.7,
+		MaxPullHeight = 10, -- only pull when you are within this many studs above their head
 
 		StickForce = 60000,
 		CenterPull = 2,
@@ -11186,12 +11187,25 @@ do
 			return
 		end
 
+		-- already on someone's head: the pull is done, stickiness takes over
+		if stickModel or getStandingCharacter() then
+			pullTarget = nil
+			pullMover.Enabled = false
+			return
+		end
+
 		local head = pullTarget
 		local vel = root.AssemblyLinearVelocity
 		local g = workspace.Gravity
 
 		local standY = head.Position.Y + head.Size.Y / 2 + legLength()
 		local dy = standY - root.Position.Y
+
+		-- too high above their head: don't pull yet (kicks in as you fall into range)
+		if -dy > CFG.MaxPullHeight then
+			pullMover.Enabled = false
+			return
+		end
 
 		local disc = vel.Y * vel.Y - 2 * g * dy
 		local t
@@ -11212,8 +11226,14 @@ do
 			needed = needed.Unit * CFG.MaxPullSpeed
 		end
 
-		pullMover.PlaneVelocity = Vector2.new(needed.X, needed.Z)
-		pullMover.MaxForce = root.AssemblyMass * CFG.PullForce * settings.PullStrength
+		-- pull strength = how much it bends your path toward their head:
+		-- 100% = straight at the head, 50% = halfway, 1% = barely changes where you were going
+		local ps = math.clamp(settings.PullStrength, 0, 1)
+		local myFlat = Vector3.new(vel.X, 0, vel.Z)
+		local aimVel = myFlat:Lerp(needed, ps)
+
+		pullMover.PlaneVelocity = Vector2.new(aimVel.X, aimVel.Z)
+		pullMover.MaxForce = root.AssemblyMass * CFG.PullForce * ps * ps
 		pullMover.Enabled = true
 	end
 
@@ -11234,9 +11254,18 @@ do
 			lastContact = now
 		elseif stickModel then
 			-- infinite grace: never times out, only lets go if they die
+			-- or you've actually fallen off (dropped below the top of their head)
 			if not isAlive(stickModel) then
 				releaseStick()
 				return
+			end
+			local theirHead = stickModel:FindFirstChild("Head")
+			if theirHead then
+				local headTop = theirHead.Position.Y + theirHead.Size.Y / 2
+				if root.Position.Y < headTop + legLength() * 0.5 then
+					releaseStick()
+					return
+				end
 			end
 		else
 			return
@@ -11282,12 +11311,19 @@ do
 		local target = yawCF:PointToWorldSpace(stickOffset)
 		local cur = root.Position
 		local goal = Vector3.new(target.X, cur.Y, target.Z)
-		local newPos = cur:Lerp(goal, math.clamp(settings.Stickiness, 0, 1))
+		-- stickiness = how fast it re-corrects you back over their head:
+		-- 100% = held exactly, 50% = firm but soft, ~5-10% = barely holds, easy to fall off
+		local s = math.clamp(settings.Stickiness, 0, 1)
+		local perFrame = s * s -- strength per frame at 60 fps
+		local alpha = 1 - (1 - perFrame) ^ (dt * 60) -- same feel at any fps
+		local newPos = cur:Lerp(goal, alpha)
 		root.CFrame = CFrame.new(newPos) * root.CFrame.Rotation
 		local theirHead = stickModel:FindFirstChild("Head")
 		local tv = theirHead and theirHead.AssemblyLinearVelocity or Vector3.zero
 		local v = root.AssemblyLinearVelocity
-		root.AssemblyLinearVelocity = Vector3.new(tv.X, v.Y, tv.Z)
+		-- only partly take on their speed at low stickiness, so you can slide off
+		local flatV = Vector3.new(v.X, 0, v.Z):Lerp(Vector3.new(tv.X, 0, tv.Z), alpha)
+		root.AssemblyLinearVelocity = Vector3.new(flatV.X, v.Y, flatV.Z)
 
 		lastTheirYaw = theirYaw
 	end
