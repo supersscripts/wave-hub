@@ -10938,7 +10938,7 @@ local playerGui = player:WaitForChild("PlayerGui")
 local CONFIG = {
 	Title = "WAVE HUB",
 	Author = "SUPER",
-	Version = "Version 2.4",
+	Version = "Version 2.5",
 	ToggleKey = Enum.KeyCode.RightControl,
 	ToggleKeyPad = Enum.KeyCode.DPadRight,
 
@@ -10948,8 +10948,8 @@ local CONFIG = {
 	},
 
 	ChangeLogs = {
-		"Version 2.4",
-		"Fixed auto sticky glitch",
+		"Version 2.5",
+		"Added height protection for auto sticky",
 	},
 }
 
@@ -11001,6 +11001,8 @@ do
 		StickForce = 60000,
 		CenterPull = 2,
 		MaxHeadOffset = 0.75, -- furthest from the center of their head it will hold you
+		MaxFollowAbove = 8, -- stops following if your feet are more than this many studs above their head
+		MaxFollowBelow = 4, -- stops following if your feet drop more than this below the top of their head
 		MoveThreshold = 0.1,
 	}
 
@@ -11108,9 +11110,12 @@ do
 		return CFrame.new(head.Position), math.atan2(-look.X, -look.Z)
 	end
 
+	local holdingLastFrame = false
+
 	local function releaseStick()
 		stickModel, stickOffset, lastTheirYaw = nil, nil, nil
 		if stickMover then stickMover.Enabled = false end
+		holdingLastFrame = false
 	end
 
 	local function cleanupCharacter()
@@ -11254,21 +11259,26 @@ do
 			lastContact = now
 		elseif stickModel then
 			-- infinite grace: never times out, only lets go if they die
-			-- or you've actually fallen off (dropped below the top of their head)
+			-- (or you leave the height window below)
 			if not isAlive(stickModel) then
 				releaseStick()
 				return
 			end
-			local theirHead = stickModel:FindFirstChild("Head")
-			if theirHead then
-				local headTop = theirHead.Position.Y + theirHead.Size.Y / 2
-				if root.Position.Y < headTop + legLength() * 0.5 then
-					releaseStick()
-					return
-				end
-			end
 		else
 			return
+		end
+
+		-- only follow while your feet are between just under the top of their head
+		-- and 5 studs above it
+		local theirHeadPart = stickModel:FindFirstChild("Head")
+		if theirHeadPart then
+			local headTop = theirHeadPart.Position.Y + theirHeadPart.Size.Y / 2
+			local feet = root.Position.Y - legLength()
+			local gap = feet - headTop
+			if gap > CFG.MaxFollowAbove or gap < -CFG.MaxFollowBelow then
+				releaseStick()
+				return
+			end
 		end
 
 		local yawCF, theirYaw = headYawCFrame(stickModel)
@@ -11280,6 +11290,7 @@ do
 		if isMoving then
 			-- you're walking: don't hold you in place
 			stickMover.Enabled = false
+			holdingLastFrame = false
 			if not under then
 				-- walked off their head on purpose: let go
 				releaseStick()
@@ -11321,6 +11332,12 @@ do
 		local theirHead = stickModel:FindFirstChild("Head")
 		local tv = theirHead and theirHead.AssemblyLinearVelocity or Vector3.zero
 		local v = root.AssemblyLinearVelocity
+		if not holdingLastFrame then
+			-- just started holding you (landed, or stopped walking): drop your leftover
+			-- walking speed so you're not moving relative to them (not counted as walking)
+			v = Vector3.new(tv.X, v.Y, tv.Z)
+			holdingLastFrame = true
+		end
 		-- only partly take on their speed at low stickiness, so you can slide off
 		local flatV = Vector3.new(v.X, 0, v.Z):Lerp(Vector3.new(tv.X, 0, tv.Z), alpha)
 		root.AssemblyLinearVelocity = Vector3.new(flatV.X, v.Y, flatV.Z)
@@ -12012,6 +12029,8 @@ local function stroke(color, thickness, transparency)
 	})
 end
 
+local activePage = nil -- the tab page that's currently open (set in selectTab)
+
 local function onClick(obj, fn)
 	obj.Active = true
 	obj.InputBegan:Connect(function(input)
@@ -12024,6 +12043,10 @@ local function onClick(obj, fn)
 			conn:Disconnect()
 			-- counts as a click/tap if the finger or mouse didn't drag away
 			if (input.Position - start).Magnitude <= 12 then
+				-- ignore clicks on a page that's fading out after switching tabs
+				local page = obj
+				while page and not page:GetAttribute("WavePage") do page = page.Parent end
+				if page and page ~= activePage then return end
 				fn()
 			end
 		end)
@@ -12279,7 +12302,7 @@ local content = create("Frame", {
 })
 
 local function newPage(name)
-	return create("CanvasGroup", {
+	local page = create("CanvasGroup", {
 		Name = name,
 		Size = UDim2.fromScale(1, 1),
 		BackgroundTransparency = 1,
@@ -12288,6 +12311,8 @@ local function newPage(name)
 		ZIndex = 4,
 		Parent = content,
 	}, { padding(22) })
+	page:SetAttribute("WavePage", true)
+	return page
 end
 
 local function pageHeader(page, title, subtitle)
@@ -13408,6 +13433,7 @@ local function selectTab(name)
 	local old = currentTab and tabs[currentTab]
 	local new = tabs[name]
 	currentTab = name
+	activePage = new.Page
 
 	tween(indicator, TI_MED, { Position = UDim2.fromOffset(10, new.Y) })
 	indicatorBar.Size = UDim2.fromOffset(3, 6)
